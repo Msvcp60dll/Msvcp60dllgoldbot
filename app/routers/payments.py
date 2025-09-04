@@ -41,7 +41,7 @@ async def handle_successful_payment(message: Message):
         )
         
         # Determine payment type
-        is_recurring = getattr(payment, 'is_recurring_payment', False)
+        is_recurring = payment.is_recurring if hasattr(payment, 'is_recurring') else False
         payment_type = 'recurring_initial' if is_recurring else 'one_time'
         
         # Insert payment with idempotency

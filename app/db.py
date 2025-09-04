@@ -1,3 +1,4 @@
+import asyncio
 import asyncpg
 from asyncpg import Pool, UniqueViolationError
 from typing import Optional, List, Dict, Any
@@ -133,7 +134,7 @@ class Database:
                                           is_recurring: bool = False):
         """Process subscription payment and extend access"""
         async with self.acquire() as conn:
-            async with conn.transaction():
+            async with conn.transaction(isolation='repeatable_read'):
                 # Get or create subscription
                 sub = await conn.fetchrow("""
                     INSERT INTO subscriptions (user_id, status, is_recurring, expires_at)

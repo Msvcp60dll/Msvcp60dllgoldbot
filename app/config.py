@@ -78,12 +78,13 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         # Extract project ID from Supabase URL
-        # Format: https://[project-id].supabase.co -> postgresql://postgres:[service-key]@db.[project-id].supabase.co:5432/postgres
+        # Try direct connection format first
         import re
         match = re.match(r'https://([^.]+)\.supabase\.co', self.supabase_url)
         if match:
             project_id = match.group(1)
-            return f"postgresql://postgres.{project_id}:{self.supabase_service_key}@aws-0-us-west-1.pooler.supabase.com:5432/postgres"
+            # Direct connection format: postgresql://postgres:[PASSWORD]@db.[project-id].supabase.co:5432/postgres
+            return f"postgresql://postgres:{self.supabase_service_key}@db.{project_id}.supabase.co:5432/postgres"
         raise ValueError("Invalid Supabase URL format")
     
     def is_owner(self, user_id: int) -> bool:

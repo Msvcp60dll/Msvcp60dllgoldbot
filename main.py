@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, Response, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from app.config import settings
