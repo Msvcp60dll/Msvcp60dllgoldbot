@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     
     supabase_url: str = Field(..., description="Supabase project URL")
     supabase_service_key: str = Field(..., description="Supabase service role key")
+    supabase_db_password: Optional[str] = Field(default=None, description="Supabase database password")
     
     webhook_secret: str = Field(..., description="Secret path for webhook URL")
     webhook_host: str = Field(default="", description="Public webhook host (e.g., https://bot.railway.app)")
@@ -78,13 +79,14 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         # Extract project ID from Supabase URL
-        # Try direct connection format first
         import re
         match = re.match(r'https://([^.]+)\.supabase\.co', self.supabase_url)
         if match:
             project_id = match.group(1)
+            # Use database password if provided, otherwise fall back to service key
+            password = self.supabase_db_password or self.supabase_service_key
             # Direct connection format: postgresql://postgres:[PASSWORD]@db.[project-id].supabase.co:5432/postgres
-            return f"postgresql://postgres:{self.supabase_service_key}@db.{project_id}.supabase.co:5432/postgres"
+            return f"postgresql://postgres:{password}@db.{project_id}.supabase.co:5432/postgres"
         raise ValueError("Invalid Supabase URL format")
     
     def is_owner(self, user_id: int) -> bool:
