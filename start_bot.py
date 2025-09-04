@@ -79,39 +79,38 @@ async def start_main_application():
         
         logger.info("Starting FastAPI application...")
         
-        # Import uvicorn and run the FastAPI app
-        import uvicorn
-        from main import app
+        # Run main.py in a subprocess to avoid port conflicts
+        import subprocess
         
         # Get port from environment
         port = int(os.getenv('PORT', 8080))
         
-        # Run uvicorn programmatically
-        config = uvicorn.Config(
-            app=app,
-            host="0.0.0.0",
-            port=port,
-            log_level="info",
-            access_log=True
+        # Start the FastAPI app using subprocess
+        process = subprocess.Popen(
+            [sys.executable, "main.py"],
+            env={**os.environ, 'PORT': str(port)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1
         )
-        server = uvicorn.Server(config)
-        await server.serve()
         
-    except ImportError as e:
-        logger.error(f"Import error: {e}")
-        logger.info("Trying alternative startup method...")
+        logger.info(f"Started FastAPI app with PID: {process.pid}")
         
-        # Try running main.py directly
-        try:
-            import main
-            if hasattr(main, 'main') and asyncio.iscoroutinefunction(main.main):
-                await main.main()
-            else:
-                # If no async main, the app might already be running
-                logger.info("Main module imported, app should be running")
-        except Exception as e2:
-            logger.error(f"Alternative startup also failed: {e2}")
-            raise
+        # Stream output from the FastAPI app
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            logger.info(f"FastAPI: {line.rstrip()}")
+            
+            # Check if process has terminated
+            if process.poll() is not None:
+                logger.error(f"FastAPI process exited with code: {process.returncode}")
+                break
+        
+        # If we get here, the FastAPI app has stopped
+        raise Exception("FastAPI application terminated")
             
     except Exception as e:
         logger.error(f"Failed to start main application: {e}")

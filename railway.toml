@@ -5,7 +5,7 @@ watchPatterns = ["**/*.py", "requirements.txt", "railway.toml"]
 
 [deploy]
 numReplicas = 1
-startCommand = "python start_bot.py"
+startCommand = "python start_simple.py"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "always"
