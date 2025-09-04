@@ -154,11 +154,17 @@ async def root():
         "status": "running"
     }
 
+async def main():
+    """Main entry point for async execution"""
+    logger.info("Main application started")
+    # The FastAPI app will be served by uvicorn from start_bot.py
+    
 if __name__ == "__main__":
     import uvicorn
+    port = int(os.getenv('PORT', 8080))
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8080,
+        port=port,
         log_level=settings.log_level.lower()
     )
