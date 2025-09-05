@@ -85,8 +85,8 @@ class Settings(BaseSettings):
             project_id = match.group(1)
             # Use database password if provided, otherwise fall back to service key
             password = self.supabase_db_password or self.supabase_service_key
-            # Direct connection format: postgresql://postgres:[PASSWORD]@db.[project-id].supabase.co:5432/postgres
-            return f"postgresql://postgres:{password}@db.{project_id}.supabase.co:5432/postgres"
+            # Using Session Pooler connection (aws-1-eu-west-2)
+            return f"postgresql://postgres.{project_id}:{password}@aws-1-eu-west-2.pooler.supabase.com:5432/postgres"
         raise ValueError("Invalid Supabase URL format")
     
     def is_owner(self, user_id: int) -> bool:
