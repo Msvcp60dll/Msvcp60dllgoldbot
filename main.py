@@ -146,9 +146,9 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     logger.info("✅ Scheduler started")
     
-    # Start retry processor
-    await start_retry_processor()
-    logger.info("✅ Retry processor started")
+    # Start retry processor (disabled due to missing schema columns)
+    # await start_retry_processor() 
+    logger.info("⚠️ Retry processor disabled (schema incomplete)")
     
     # All systems go!
     logger.info("🚀 Bot started successfully")
@@ -162,9 +162,9 @@ async def lifespan(app: FastAPI):
     shutdown_start = time.time()
     logger.info("application.shutdown_initiated")
     
-    # Stop retry processor
-    stop_retry_processor()
-    logger.info("retry_processor.stopped")
+    # Stop retry processor (was disabled)
+    # stop_retry_processor()
+    logger.info("retry_processor.was_disabled")
     
     # Stop scheduler
     stop_scheduler()
