@@ -14,6 +14,9 @@ async def handle_join_request(request: ChatJoinRequest):
     """Handle group join requests"""
     user_id = request.from_user.id
     
+    # CRITICAL DEBUG: Log every join request
+    logger.info(f"🔥 JOIN REQUEST RECEIVED from user {user_id} (@{request.from_user.username})")
+    
     try:
         # Upsert user
         await db.upsert_user(
@@ -26,9 +29,11 @@ async def handle_join_request(request: ChatJoinRequest):
         
         # Burn whitelist if exists
         was_whitelisted = await db.burn_whitelist(user_id)
+        logger.info(f"User {user_id} whitelist check: was_whitelisted={was_whitelisted}")
         
         # Check if user has active access
         has_access = await db.has_active_access(user_id)
+        logger.info(f"User {user_id} access check: has_access={has_access}")
         
         if has_access or was_whitelisted:
             # Approve immediately
@@ -43,8 +48,10 @@ async def handle_join_request(request: ChatJoinRequest):
             return
         
         # Send payment offer
+        logger.info(f"User {user_id} needs payment - sending DM with payment options")
         await send_payment_offer(request.from_user)
         await db.log_event(user_id, "offer_shown", {"via": "join_request"})
+        logger.info(f"Payment offer sent to user {user_id}")
         
     except Exception as e:
         logger.error(f"Error handling join request for user {user_id}: {e}", exc_info=True)
@@ -52,6 +59,8 @@ async def handle_join_request(request: ChatJoinRequest):
 async def send_payment_offer(user):
     """Send payment offer to user"""
     from app.bot import bot
+    
+    logger.info(f"Preparing to send payment offer to user {user.id}")
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -83,14 +92,19 @@ async def send_payment_offer(user):
     )
     
     try:
+        logger.info(f"Attempting to send DM to user {user.id}...")
         await bot.send_message(
             chat_id=user.id,
             text=text,
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode="HTML"  # CRITICAL: This was missing!
         )
-    except TelegramForbiddenError:
-        logger.warning(f"Cannot send message to user {user.id} - bot blocked")
+        logger.info(f"✅ Successfully sent payment offer DM to user {user.id}")
+    except TelegramForbiddenError as e:
+        logger.warning(f"Cannot send message to user {user.id} - bot blocked: {e}")
         await db.log_event(user.id, "offer_blocked", {})
+    except Exception as e:
+        logger.error(f"❌ Failed to send DM to user {user.id}: {e}", exc_info=True)
 
 @router.callback_query(F.data == "pay:one")
 async def handle_one_time_payment(callback: CallbackQuery):

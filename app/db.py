@@ -209,17 +209,18 @@ class Database:
         return await self.fetchval("""
             SELECT EXISTS(
                 SELECT 1 FROM whitelist
-                WHERE telegram_id = $1 
+                WHERE (telegram_id = $1 OR user_id = $1)
                     AND revoked_at IS NULL
             )
         """, user_id)
     
     async def burn_whitelist(self, user_id: int) -> bool:
         """Burn whitelist entry on join request (mark as used)"""
+        # Try telegram_id first (new schema), then user_id (old schema)
         result = await self.execute("""
             UPDATE whitelist 
             SET revoked_at = NOW(), note = COALESCE(note, '') || ' - Used for join'
-            WHERE telegram_id = $1 AND revoked_at IS NULL
+            WHERE (telegram_id = $1 OR user_id = $1) AND revoked_at IS NULL
         """, user_id)
         return result != "UPDATE 0"
     
@@ -228,7 +229,7 @@ class Database:
         await self.execute("""
             UPDATE whitelist
             SET revoked_at = NOW(), note = COALESCE(note, '') || ' - User left group'
-            WHERE telegram_id = $1 AND revoked_at IS NULL
+            WHERE (telegram_id = $1 OR user_id = $1) AND revoked_at IS NULL
         """, user_id)
     
     # Funnel events
@@ -422,7 +423,7 @@ class Database:
         """Check if user is whitelisted (active, not revoked)"""
         result = await self.fetchrow("""
             SELECT 1 FROM whitelist 
-            WHERE telegram_id = $1 AND revoked_at IS NULL
+            WHERE (telegram_id = $1 OR user_id = $1) AND revoked_at IS NULL
         """, user_id)
         return result is not None
     
@@ -430,14 +431,14 @@ class Database:
         """Get detailed whitelist status for user"""
         return await self.fetchrow("""
             SELECT 
-                telegram_id,
+                COALESCE(telegram_id, user_id) as telegram_id,
                 granted_at,
                 revoked_at,
                 source,
                 note,
                 CASE WHEN revoked_at IS NULL THEN true ELSE false END as is_active
             FROM whitelist
-            WHERE telegram_id = $1
+            WHERE (telegram_id = $1 OR user_id = $1)
         """, user_id)
     
     async def get_whitelist_stats(self) -> dict:

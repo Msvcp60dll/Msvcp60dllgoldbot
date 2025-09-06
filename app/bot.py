@@ -47,7 +47,8 @@ async def setup_bot():
                 "callback_query",
                 "chat_join_request",
                 "chat_member",
-                "pre_checkout_query"
+                "pre_checkout_query",
+                "successful_payment"  # CRITICAL: This was missing!
             ],
             drop_pending_updates=True,
             secret_token=secret,
