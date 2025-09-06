@@ -40,20 +40,33 @@ async def setup_bot():
     if settings.public_base_url:
         webhook_url = settings.webhook_url
         secret = settings.effective_telegram_secret
+        
+        # CRITICAL: Explicitly set allowed_updates including chat_join_request
+        allowed_updates = [
+            "message",
+            "callback_query",
+            "chat_join_request",  # CRITICAL for join requests!
+            "chat_member",
+            "pre_checkout_query",
+            "successful_payment"
+        ]
+        
+        logger.info(f"Setting webhook with allowed_updates: {allowed_updates}")
+        
         await bot.set_webhook(
             url=webhook_url,
-            allowed_updates=[
-                "message",
-                "callback_query",
-                "chat_join_request",
-                "chat_member",
-                "pre_checkout_query",
-                "successful_payment"  # CRITICAL: This was missing!
-            ],
+            allowed_updates=allowed_updates,
             drop_pending_updates=True,
             secret_token=secret,
         )
+        
+        # Verify webhook was set correctly
+        webhook_info = await bot.get_webhook_info()
         logger.info(f"Webhook set to {webhook_url}")
+        logger.info(f"Webhook allowed_updates: {webhook_info.allowed_updates}")
+        
+        if "chat_join_request" not in (webhook_info.allowed_updates or []):
+            logger.critical("⚠️ WARNING: chat_join_request NOT in webhook allowed_updates!")
     else:
         logger.warning("No webhook host configured, running in polling mode")
 

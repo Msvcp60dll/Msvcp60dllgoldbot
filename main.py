@@ -226,6 +226,21 @@ async def webhook_handler(request: Request):
         # Parse and validate webhook data
         update_dict = await request.json()
         
+        # EMERGENCY DEBUG: Log ALL incoming updates
+        update_type = "unknown"
+        if "chat_join_request" in update_dict:
+            update_type = "chat_join_request"
+            logger.critical(f"🚨 WEBHOOK RECEIVED JOIN REQUEST: {update_dict['chat_join_request']}")
+            print(f"🚨 JOIN REQUEST IN WEBHOOK: {update_dict['chat_join_request']}")
+        elif "message" in update_dict:
+            update_type = "message"
+        elif "callback_query" in update_dict:
+            update_type = "callback_query"
+        elif "pre_checkout_query" in update_dict:
+            update_type = "pre_checkout_query"
+            
+        logger.info(f"Webhook received update type: {update_type}, update_id: {update_dict.get('update_id')}")
+        
         # Validate update structure
         try:
             webhook_data = WebhookUpdateData(**update_dict)
@@ -378,6 +393,24 @@ app.get("/admin/dashboard/legacy")(dashboard_html_secure)
 app.get("/admin/api/summary")(dashboard_api_summary)
 app.get("/admin/dashboard")(dashboard_html_enhanced)
 app.get("/admin/api/overdue/csv")(export_overdue_csv)
+
+@app.get("/webhook-info")
+async def webhook_info():
+    """Check webhook configuration"""
+    try:
+        info = await bot.get_webhook_info()
+        return {
+            "url": info.url,
+            "allowed_updates": info.allowed_updates,
+            "pending_update_count": info.pending_update_count,
+            "has_custom_certificate": info.has_custom_certificate,
+            "ip_address": info.ip_address,
+            "last_error_date": info.last_error_date,
+            "last_error_message": info.last_error_message,
+            "max_connections": info.max_connections
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/")
 async def root():

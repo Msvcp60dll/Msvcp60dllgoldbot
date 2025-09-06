@@ -9,13 +9,27 @@ from app.routers.payments import finalize_access
 logger = logging.getLogger(__name__)
 router = Router()
 
+# EMERGENCY DEBUG: Catch ALL join requests to diagnose filter issues
+@router.chat_join_request()
+async def debug_all_join_requests(request: ChatJoinRequest):
+    """Debug handler to catch ALL join requests"""
+    print(f"🔴 DEBUG: Join request from ANY chat: chat_id={request.chat.id}, user={request.from_user.id}")
+    logger.critical(f"🔴 DEBUG: Join request from ANY chat: chat_id={request.chat.id}, user={request.from_user.id}")
+    logger.critical(f"🔴 Expected group_chat_id={settings.group_chat_id}, received={request.chat.id}, match={request.chat.id == settings.group_chat_id}")
+    # Don't process, just log and pass through
+
 @router.chat_join_request(F.chat.id == settings.group_chat_id)
 async def handle_join_request(request: ChatJoinRequest):
     """Handle group join requests"""
-    user_id = request.from_user.id
+    # EMERGENCY LOGGING - Multiple methods to ensure we see this
+    print(f"🚨 JOIN REQUEST HANDLER TRIGGERED - User: {request.from_user.id}")
+    logger.critical(f"🚨 JOIN REQUEST HANDLER TRIGGERED - User: {request.from_user.id}")
+    logger.info(f"🔥 JOIN REQUEST RECEIVED from user {request.from_user.id} (@{request.from_user.username})")
     
-    # CRITICAL DEBUG: Log every join request
-    logger.info(f"🔥 JOIN REQUEST RECEIVED from user {user_id} (@{request.from_user.username})")
+    user_id = request.from_user.id
+    chat_id = request.chat.id
+    
+    logger.info(f"Request details: chat_id={chat_id}, expected={settings.group_chat_id}, match={chat_id == settings.group_chat_id}")
     
     try:
         # Upsert user
