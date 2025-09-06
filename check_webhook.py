@@ -63,16 +63,11 @@ async def check_webhook():
         if not info.url or "chat_join_request" not in (info.allowed_updates or []):
             print("\n🔧 FIXING WEBHOOK CONFIGURATION...")
             
+            from app.webhook_config import REQUIRED_WEBHOOK_UPDATES
+            
             await bot.set_webhook(
                 url=settings.webhook_url,
-                allowed_updates=[
-                    "message",
-                    "callback_query", 
-                    "chat_join_request",  # CRITICAL!
-                    "chat_member",
-                    "pre_checkout_query",
-                    "successful_payment"  # CRITICAL!
-                ],
+                allowed_updates=REQUIRED_WEBHOOK_UPDATES,
                 drop_pending_updates=False,
                 secret_token=settings.effective_telegram_secret
             )

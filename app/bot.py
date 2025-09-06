@@ -5,6 +5,7 @@ from aiogram.types import BotCommand
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 import logging
 from app.config import settings
+from app.webhook_config import REQUIRED_WEBHOOK_UPDATES, validate_webhook_updates
 
 logger = logging.getLogger(__name__)
 
@@ -41,22 +42,13 @@ async def setup_bot():
         webhook_url = settings.webhook_url
         secret = settings.effective_telegram_secret
         
-        # CRITICAL: Explicitly set allowed_updates including chat_join_request
-        allowed_updates = [
-            "message",
-            "callback_query",
-            "chat_join_request",  # CRITICAL for join requests!
-            "chat_member",
-            "pre_checkout_query",
-            "successful_payment"
-        ]
-        
-        logger.info(f"Setting webhook with allowed_updates: {allowed_updates}")
+        # Use the single source of truth for webhook configuration
+        logger.info(f"Setting webhook with allowed_updates: {REQUIRED_WEBHOOK_UPDATES}")
         
         await bot.set_webhook(
             url=webhook_url,
-            allowed_updates=allowed_updates,
-            drop_pending_updates=True,
+            allowed_updates=REQUIRED_WEBHOOK_UPDATES,
+            drop_pending_updates=False,  # Don't lose pending updates
             secret_token=secret,
         )
         
@@ -70,19 +62,15 @@ async def setup_bot():
         if "successful_payment" not in (webhook_info.allowed_updates or []):
             logger.critical("⚠️ WARNING: successful_payment NOT in webhook allowed_updates!")
             
-        # FORCE correct webhook if missing critical updates
-        critical_missing = []
-        if "chat_join_request" not in (webhook_info.allowed_updates or []):
-            critical_missing.append("chat_join_request")
-        if "successful_payment" not in (webhook_info.allowed_updates or []):
-            critical_missing.append("successful_payment")
-            
-        if critical_missing:
-            logger.critical(f"🚨 FORCING WEBHOOK RESET - Missing: {critical_missing}")
+        # Validate webhook configuration using single source of truth
+        is_valid, missing = validate_webhook_updates(webhook_info.allowed_updates)
+        
+        if not is_valid:
+            logger.critical(f"🚨 FORCING WEBHOOK RESET - Missing: {missing}")
             await bot.delete_webhook(drop_pending_updates=False)
             await bot.set_webhook(
                 url=webhook_url,
-                allowed_updates=allowed_updates,
+                allowed_updates=REQUIRED_WEBHOOK_UPDATES,
                 drop_pending_updates=False,
                 secret_token=secret,
             )

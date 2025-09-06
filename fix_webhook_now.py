@@ -26,17 +26,12 @@ async def fix_webhook_now():
         print("\n🔧 Fixing webhook configuration...")
         await bot.delete_webhook(drop_pending_updates=False)
         
-        # Set webhook with ALL critical updates
+        # Set webhook using single source of truth
+        from app.webhook_config import REQUIRED_WEBHOOK_UPDATES
+        
         result = await bot.set_webhook(
             url=settings.webhook_url,
-            allowed_updates=[
-                "message",
-                "callback_query",
-                "chat_join_request",     # CRITICAL for join requests
-                "chat_member", 
-                "pre_checkout_query",
-                "successful_payment"     # CRITICAL for payments
-            ],
+            allowed_updates=REQUIRED_WEBHOOK_UPDATES,
             drop_pending_updates=False,  # Don't lose pending updates
             secret_token=settings.effective_telegram_secret
         )
