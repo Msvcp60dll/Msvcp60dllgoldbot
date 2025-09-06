@@ -203,6 +203,16 @@ async def webhook_handler(request: Request):
     """Handle Telegram webhook"""
     start_time = time.time()
     
+    # CRITICAL DEBUG: Log raw webhook body
+    body = await request.body()
+    logger.critical(f"🔴 WEBHOOK RAW BODY: {body[:500].decode('utf-8', errors='ignore')}")
+    if b"chat_join_request" in body:
+        logger.critical("🚨🚨🚨 JOIN REQUEST DETECTED IN WEBHOOK BODY!")
+        print("🚨🚨🚨 JOIN REQUEST IN WEBHOOK!")
+    
+    # Reset body for json parsing
+    request._body = body
+    
     # Extract or create correlation ID
     correlation_id = (
         request.headers.get("X-Correlation-ID") or
@@ -263,9 +273,19 @@ async def webhook_handler(request: Request):
         from aiogram.types import Update
         telegram_update = Update(**update_dict)
         
+        # CRITICAL DEBUG: Log before feeding to dispatcher
+        if "chat_join_request" in update_dict:
+            logger.critical(f"🚨 FEEDING JOIN REQUEST TO DISPATCHER: {update_dict['chat_join_request']}")
+            print(f"🚨 DISPATCHER FEED: JOIN REQUEST from user {update_dict['chat_join_request'].get('from', {}).get('id')}")
+        
         # Process update
         process_start = time.time()
-        await dp.feed_update(bot=bot, update=telegram_update)
+        try:
+            await dp.feed_update(bot=bot, update=telegram_update)
+            logger.info(f"Update fed to dispatcher successfully: type={update_type}")
+        except Exception as dp_error:
+            logger.error(f"Dispatcher error: {dp_error}", exc_info=True)
+            raise
         process_duration = int((time.time() - process_start) * 1000)
         
         total_duration = int((time.time() - start_time) * 1000)

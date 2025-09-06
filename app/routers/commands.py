@@ -10,6 +10,18 @@ from app.db import db
 logger = logging.getLogger(__name__)
 router = Router()
 
+@router.message(Command("test_dm"))
+async def test_dm(message: Message):
+    """Test if bot can send DMs"""
+    user_id = message.from_user.id
+    try:
+        await message.bot.send_message(user_id, "✅ Test DM works! Bot can send you messages.")
+        await message.answer("✅ DM sent successfully!")
+        logger.info(f"Test DM sent successfully to user {user_id}")
+    except Exception as e:
+        await message.answer(f"❌ Cannot send DM: {str(e)}")
+        logger.error(f"Cannot send DM to user {user_id}: {e}")
+
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     """Handle /start command"""
