@@ -67,6 +67,27 @@ async def setup_bot():
         
         if "chat_join_request" not in (webhook_info.allowed_updates or []):
             logger.critical("⚠️ WARNING: chat_join_request NOT in webhook allowed_updates!")
+        if "successful_payment" not in (webhook_info.allowed_updates or []):
+            logger.critical("⚠️ WARNING: successful_payment NOT in webhook allowed_updates!")
+            
+        # FORCE correct webhook if missing critical updates
+        critical_missing = []
+        if "chat_join_request" not in (webhook_info.allowed_updates or []):
+            critical_missing.append("chat_join_request")
+        if "successful_payment" not in (webhook_info.allowed_updates or []):
+            critical_missing.append("successful_payment")
+            
+        if critical_missing:
+            logger.critical(f"🚨 FORCING WEBHOOK RESET - Missing: {critical_missing}")
+            await bot.delete_webhook(drop_pending_updates=False)
+            await bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=allowed_updates,
+                drop_pending_updates=False,
+                secret_token=secret,
+            )
+            webhook_info = await bot.get_webhook_info()
+            logger.info(f"Webhook FORCED reset. New allowed_updates: {webhook_info.allowed_updates}")
     else:
         logger.warning("No webhook host configured, running in polling mode")
 
