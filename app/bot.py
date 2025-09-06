@@ -36,9 +36,10 @@ async def setup_bot():
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook deleted")
     
-    # Set webhook if host is configured
-    if settings.webhook_host:
+    # Set webhook if public base URL is configured
+    if settings.public_base_url:
         webhook_url = settings.webhook_url
+        secret = settings.effective_telegram_secret
         await bot.set_webhook(
             url=webhook_url,
             allowed_updates=[
@@ -48,7 +49,8 @@ async def setup_bot():
                 "chat_member",
                 "pre_checkout_query"
             ],
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            secret_token=secret,
         )
         logger.info(f"Webhook set to {webhook_url}")
     else:

@@ -37,6 +37,38 @@ async def cmd_start(message: Message):
     
     await message.answer(text)
 
+@router.message(Command("paysupport"))
+async def cmd_paysupport(message: Message):
+    """Provide payment support instructions and notify owners"""
+    user = message.from_user
+    await db.log_event(user.id, "paysupport_requested", {})
+
+    help_text = (
+        "🛟 <b>Payment Support</b>\n\n"
+        "If you had an issue with Stars payment or access:\n"
+        "• Keep your Telegram receipt/charge ID\n"
+        "• Try /enter to refresh access\n"
+        "• If it still fails, reply here with details\n\n"
+        "An admin will review shortly."
+    )
+    await message.answer(help_text)
+
+    # Notify owners for follow-up (best-effort)
+    try:
+        from app.bot import bot
+        owner_text = (
+            f"🔔 Payment support request\n"
+            f"User: {user.id} @{user.username or ''} {user.first_name or ''}\n"
+            f"Message ID: {message.message_id}"
+        )
+        for owner_id in settings.owner_ids:
+            try:
+                await bot.send_message(owner_id, owner_text)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 @router.message(Command("status"))
 async def cmd_status(message: Message):
     """Check subscription status"""
@@ -310,3 +342,345 @@ async def callback_enter(callback: CallbackQuery):
     """Handle enter button from status"""
     await callback.message.delete()
     await cmd_enter(callback.message)
+
+# ============= KICK CONTROL COMMANDS (OWNERS ONLY) =============
+
+@router.message(Command("kicks_off"))
+async def cmd_kicks_off(message: Message):
+    """Disable kicks globally (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    success = await db.set_feature_flag('kick_enabled', False)
+    if success:
+        await message.answer(
+            "🛡️ <b>Kicks DISABLED</b>\n\n"
+            "The bot will NOT kick any users.\n"
+            "All expired members are protected."
+        )
+        await db.log_event(user_id, "kicks_disabled", {})
+    else:
+        await message.answer("❌ Failed to disable kicks. Check database connection.")
+
+@router.message(Command("kicks_on"))
+async def cmd_kicks_on(message: Message):
+    """Enable kicks globally (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    # Double confirmation
+    await message.answer(
+        "⚠️ <b>WARNING: Enable Kicks?</b>\n\n"
+        "This will allow the bot to kick expired users.\n"
+        "Make sure whitelist is properly seeded first!\n\n"
+        "Type /kicks_on_confirm to proceed."
+    )
+
+@router.message(Command("kicks_on_confirm"))
+async def cmd_kicks_on_confirm(message: Message):
+    """Confirm enabling kicks (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    success = await db.set_feature_flag('kick_enabled', True)
+    if success:
+        await message.answer(
+            "⚠️ <b>Kicks ENABLED</b>\n\n"
+            "The bot will now kick expired users.\n"
+            "Whitelisted users remain protected."
+        )
+        await db.log_event(user_id, "kicks_enabled", {})
+    else:
+        await message.answer("❌ Failed to enable kicks. Check database connection.")
+
+@router.message(Command("kicks_status"))
+async def cmd_kicks_status(message: Message):
+    """Check kick status (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    is_enabled = await db.is_kicks_enabled()
+    status_emoji = "⚠️" if is_enabled else "🛡️"
+    status_text = "ENABLED" if is_enabled else "DISABLED"
+    
+    # Get whitelist stats
+    wl_stats = await db.get_whitelist_stats()
+    
+    text = (
+        f"{status_emoji} <b>Kick System Status</b>\n\n"
+        f"Status: <b>{status_text}</b>\n\n"
+        f"<b>Whitelist Protection:</b>\n"
+        f"Total whitelisted: {wl_stats.get('total_whitelisted', 0)}\n"
+        f"Revoked: {wl_stats.get('revoked_count', 0)}\n"
+        f"Active subs whitelisted: {wl_stats.get('subs_active_whitelisted', 0)}\n"
+        f"Expired subs whitelisted: {wl_stats.get('subs_expired_whitelisted', 0)}\n\n"
+        f"<i>Use /kicks_off to disable kicks</i>"
+    )
+    
+    await message.answer(text)
+
+# ============= WHITELIST MANAGEMENT COMMANDS (OWNERS ONLY) =============
+
+@router.message(Command("wl_add"))
+async def cmd_wl_add(message: Message):
+    """Add user to whitelist (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    # Parse command arguments
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer(
+            "Usage: /wl_add <user_id> [note]\n"
+            "Example: /wl_add 12345678 VIP member"
+        )
+        return
+    
+    try:
+        target_user_id = int(args[1])
+        note = args[2] if len(args) > 2 else None
+    except ValueError:
+        await message.answer("❌ Invalid user ID. Must be a number.")
+        return
+    
+    success = await db.grant_whitelist(target_user_id, 'manual_command', note)
+    if success:
+        await message.answer(
+            f"✅ User {target_user_id} added to whitelist.\n"
+            f"Note: {note or 'No note'}"
+        )
+        await db.log_event(user_id, "whitelist_add_manual", {
+            'target_user_id': target_user_id,
+            'note': note
+        })
+    else:
+        await message.answer("❌ Failed to add user to whitelist.")
+
+@router.message(Command("wl_remove"))
+async def cmd_wl_remove(message: Message):
+    """Remove user from whitelist (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    # Parse command arguments
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer(
+            "Usage: /wl_remove <user_id> [reason]\n"
+            "Example: /wl_remove 12345678 No longer VIP"
+        )
+        return
+    
+    try:
+        target_user_id = int(args[1])
+        reason = args[2] if len(args) > 2 else 'manual_removal'
+    except ValueError:
+        await message.answer("❌ Invalid user ID. Must be a number.")
+        return
+    
+    success = await db.revoke_whitelist(target_user_id, reason)
+    if success:
+        await message.answer(
+            f"✅ User {target_user_id} removed from whitelist.\n"
+            f"Reason: {reason}"
+        )
+        await db.log_event(user_id, "whitelist_remove_manual", {
+            'target_user_id': target_user_id,
+            'reason': reason
+        })
+    else:
+        await message.answer("❌ User was not whitelisted or removal failed.")
+
+@router.message(Command("wl_status"))
+async def cmd_wl_status(message: Message):
+    """Check whitelist status of a user (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    # Parse command arguments
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        # Check self if no user_id provided
+        target_user_id = user_id
+    else:
+        try:
+            target_user_id = int(args[1])
+        except ValueError:
+            await message.answer("❌ Invalid user ID. Must be a number.")
+            return
+    
+    # Get whitelist status
+    wl_status = await db.get_whitelist_status(target_user_id)
+    
+    if not wl_status:
+        await message.answer(f"❌ User {target_user_id} has never been whitelisted.")
+        return
+    
+    # Format status message
+    status_emoji = "✅" if wl_status['is_active'] else "❌"
+    status_text = "ACTIVE" if wl_status['is_active'] else "REVOKED"
+    
+    text = (
+        f"{status_emoji} <b>Whitelist Status</b>\n\n"
+        f"User ID: {wl_status['telegram_id']}\n"
+        f"Status: <b>{status_text}</b>\n"
+        f"Source: {wl_status['source']}\n"
+        f"Granted: {wl_status['granted_at'].strftime('%Y-%m-%d %H:%M UTC') if wl_status['granted_at'] else 'Unknown'}\n"
+    )
+    
+    if wl_status['revoked_at']:
+        text += f"Revoked: {wl_status['revoked_at'].strftime('%Y-%m-%d %H:%M UTC')}\n"
+    
+    if wl_status['note']:
+        text += f"Note: {wl_status['note']}\n"
+    
+    await message.answer(text)
+
+@router.message(Command("wl_stats"))
+async def cmd_wl_stats(message: Message):
+    """Show whitelist statistics (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    stats = await db.get_whitelist_stats()
+    
+    text = (
+        "📋 <b>Whitelist Statistics</b>\n\n"
+        f"<b>Total whitelisted:</b> {stats.get('total_whitelisted', 0)}\n"
+        f"<b>Revoked:</b> {stats.get('revoked_count', 0)}\n\n"
+        f"<b>Subscription Status:</b>\n"
+        f"Active subs whitelisted: {stats.get('subs_active_whitelisted', 0)}\n"
+        f"Expired/Grace whitelisted: {stats.get('subs_expired_whitelisted', 0)}\n\n"
+        f"<i>Use /wl_report for detailed report</i>"
+    )
+    
+    await message.answer(text)
+
+@router.message(Command("dryrun_expired"))
+async def cmd_dryrun_expired(message: Message):
+    """Show who would be kicked (dry-run, owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    # Get expired non-whitelisted users
+    expired_users = await db.get_expired_non_whitelisted(limit=20)
+    
+    if not expired_users:
+        await message.answer("✅ No users would be kicked. All expired users are whitelisted.")
+        return
+    
+    text = (
+        "🔍 <b>Dry-Run: Users That Would Be Kicked</b>\n"
+        f"<i>(Showing up to 20 users)</i>\n\n"
+    )
+    
+    for user in expired_users:
+        username = f"@{user['username']}" if user['username'] else "No username"
+        name = user['first_name'] or "Unknown"
+        reason = user['kick_reason']
+        expired = user['expires_at'].strftime('%Y-%m-%d') if user['expires_at'] else 'N/A'
+        
+        text += (
+            f"• {name} ({username})\n"
+            f"  ID: {user['user_id']}\n"
+            f"  Reason: {reason}\n"
+            f"  Expired: {expired}\n\n"
+        )
+    
+    text += (
+        f"\n<b>Total would be kicked:</b> {len(expired_users)}\n"
+        f"<i>Use /wl_add to protect specific users</i>"
+    )
+    
+    await message.answer(text)
+
+@router.message(Command("wl_report"))
+async def cmd_wl_report(message: Message):
+    """Generate detailed whitelist report (owners only)"""
+    user_id = message.from_user.id
+    
+    if not settings.is_owner(user_id):
+        await message.answer("❌ This command is for bot owners only.")
+        return
+    
+    # Get comprehensive stats
+    stats = await db.get_whitelist_stats()
+    is_kicks_enabled = await db.is_kicks_enabled()
+    expired_count = len(await db.get_expired_non_whitelisted(limit=1000))
+    
+    # Get recent whitelist activity
+    recent_grants = await db.fetch("""
+        SELECT telegram_id, granted_at, source, note
+        FROM whitelist
+        WHERE revoked_at IS NULL
+        ORDER BY granted_at DESC
+        LIMIT 5
+    """)
+    
+    recent_revokes = await db.fetch("""
+        SELECT telegram_id, revoked_at, note
+        FROM whitelist
+        WHERE revoked_at IS NOT NULL
+        ORDER BY revoked_at DESC
+        LIMIT 5
+    """)
+    
+    text = (
+        "📊 <b>WHITELIST REPORT</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>System Status:</b>\n"
+        f"Kicks: {'⚠️ ENABLED' if is_kicks_enabled else '🛡️ DISABLED'}\n\n"
+        f"<b>Whitelist Stats:</b>\n"
+        f"Total protected: {stats.get('total_whitelisted', 0)}\n"
+        f"Revoked: {stats.get('revoked_count', 0)}\n"
+        f"Active subs protected: {stats.get('subs_active_whitelisted', 0)}\n"
+        f"Expired subs protected: {stats.get('subs_expired_whitelisted', 0)}\n\n"
+        f"<b>Risk Assessment:</b>\n"
+        f"Users at risk (not whitelisted): {expired_count}\n\n"
+    )
+    
+    if recent_grants:
+        text += "<b>Recent Grants:</b>\n"
+        for grant in recent_grants[:3]:
+            text += f"• {grant['telegram_id']} ({grant['source']})\n"
+        text += "\n"
+    
+    if recent_revokes:
+        text += "<b>Recent Revokes:</b>\n"
+        for revoke in recent_revokes[:3]:
+            text += f"• {revoke['telegram_id']}\n"
+        text += "\n"
+    
+    text += (
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "<i>Run /dryrun_expired to see who would be kicked</i>"
+    )
+    
+    await message.answer(text)

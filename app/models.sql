@@ -71,6 +71,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_payments_charge_id
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_payments_star_tx
     ON payments(star_tx_id) WHERE star_tx_id IS NOT NULL;
 
+-- Ensure at most one active/grace subscription per user
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_sub_active_grace_per_user
+    ON subscriptions(user_id) WHERE status IN ('active', 'grace');
+
 -- Whitelist for existing members
 CREATE TABLE IF NOT EXISTS whitelist (
     whitelist_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

@@ -1,0 +1,118 @@
+name: Deploy to Railway
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Link project/service
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_SERVICE_NAME: ${{ secrets.RAILWAY_SERVICE_NAME }}
+        run: |
+          railway link --project "$RAILWAY_PROJECT_ID" || true
+          if [ -n "$RAILWAY_SERVICE_NAME" ]; then
+            railway link --service "$RAILWAY_SERVICE_NAME" || true
+          fi
+
+      - name: Push variables (if provided)
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE: ${{ secrets.RAILWAY_SERVICE_NAME }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GROUP_CHAT_ID: ${{ secrets.GROUP_CHAT_ID }}
+          OWNER_IDS: ${{ secrets.OWNER_IDS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_HOST: ${{ secrets.WEBHOOK_HOST }}
+          PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+          DASHBOARD_TOKENS: ${{ secrets.DASHBOARD_TOKENS }}
+        run: |
+          set -e
+          set_vars=()
+          for key in BOT_TOKEN GROUP_CHAT_ID OWNER_IDS DATABASE_URL SUPABASE_URL SUPABASE_SERVICE_KEY WEBHOOK_SECRET WEBHOOK_HOST PUBLIC_BASE_URL DASHBOARD_TOKENS; do
+            val=$(printenv "$key" || true)
+            if [ -n "$val" ]; then
+              set_vars+=("$key=$val")
+            fi
+          done
+          if [ ${#set_vars[@]} -gt 0 ]; then
+            printf '%s\n' "${set_vars[@]}" | while IFS='=' read -r k v; do
+              if [ -n "$SERVICE" ]; then
+                railway variables set "$k=$v" --service "$SERVICE"
+              else
+                railway variables set "$k=$v"
+              fi
+            done
+          fi
+
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE: ${{ secrets.RAILWAY_SERVICE_NAME }}
+        run: |
+          if [ -n "$SERVICE" ]; then
+            railway up --service "$SERVICE" --ci
+          else
+            railway up --ci
+          fi
+
+      - name: Discover domain and set public base vars
+        if: ${{ always() }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE: ${{ secrets.RAILWAY_SERVICE_NAME }}
+        run: |
+          STATUS=$(railway status --json || echo '{}')
+          DOMAIN=$(echo "$STATUS" | jq -r '.. | objects | select(.domain?) | .domain' | head -n1)
+          if [ -n "$DOMAIN" ] && [ "$DOMAIN" != "null" ]; then
+            BASE="https://$DOMAIN"
+            if [ -n "$SERVICE" ]; then
+              railway variables set WEBHOOK_HOST="$BASE" --service "$SERVICE"
+              railway variables set PUBLIC_BASE_URL="$BASE" --service "$SERVICE"
+            else
+              railway variables set WEBHOOK_HOST="$BASE"
+              railway variables set PUBLIC_BASE_URL="$BASE"
+            fi
+            echo "PUBLIC_BASE_URL=$BASE" >> $GITHUB_ENV
+          fi
+
+      - name: Set webhook (optional)
+        if: ${{ env.PUBLIC_BASE_URL != '' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_HOST: ${{ env.PUBLIC_BASE_URL }}
+        run: |
+          chmod +x scripts/set_webhook.sh || true
+          ./scripts/set_webhook.sh | tee webhook_info.json || true
+
+      - name: Upload webhook info
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: webhook-info
+          path: webhook_info.json
+

@@ -1,233 +1,335 @@
 #!/usr/bin/env python3
 """
-Seed whitelist with existing group members using Telethon
-This script fetches all current members from the group and adds them to the whitelist
+Whitelist Seeding Script using Telethon (User Account)
+Seeds whitelist with all current group members to protect them from being kicked.
 """
 
-import asyncio
+import os
 import sys
+import asyncio
+import csv
+import json
+from datetime import datetime
+from typing import List, Dict, Optional
 from pathlib import Path
-from datetime import datetime, timezone
-import logging
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.config import settings
-from app.db import db
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Check if telethon is installed
 try:
     from telethon import TelegramClient
     from telethon.tl.functions.channels import GetParticipantsRequest
     from telethon.tl.types import ChannelParticipantsSearch
-except ImportError:
-    print("Telethon is required for this script. Install it with:")
-    print("pip install telethon")
+    from telethon.errors import SessionPasswordNeededError
+    import asyncpg
+    from dotenv import load_dotenv
+except ImportError as e:
+    print(f"Missing dependencies: {e}")
+    print("Run: pip install telethon asyncpg python-dotenv")
     sys.exit(1)
 
-async def seed_whitelist_from_group():
-    """Fetch group members and add them to whitelist"""
-    
-    # You need to create a Telegram app and get api_id and api_hash from:
-    # https://my.telegram.org/apps
-    print("\n=== Telethon Whitelist Seeder ===")
-    print("\nTo use this script, you need:")
-    print("1. Go to https://my.telegram.org/apps")
-    print("2. Create an app (or use existing)")
-    print("3. Get your api_id and api_hash")
-    print()
-    
-    api_id = input("Enter your api_id: ").strip()
-    api_hash = input("Enter your api_hash: ").strip()
-    
-    if not api_id or not api_hash:
-        print("Error: api_id and api_hash are required")
-        return
-    
-    try:
-        api_id = int(api_id)
-    except ValueError:
-        print("Error: api_id must be a number")
-        return
-    
-    # Create client
-    client = TelegramClient('whitelist_seeder_session', api_id, api_hash)
-    
-    try:
-        # Connect and authorize
-        await client.start()
-        logger.info("Connected to Telegram")
+# Load environment variables
+load_dotenv()
+
+class WhitelistSeeder:
+    def __init__(self):
+        # Environment configuration
+        self.dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
+        self.api_id = os.getenv('TELETHON_API_ID')
+        self.api_hash = os.getenv('TELETHON_API_HASH')
+        self.phone = os.getenv('TELETHON_PHONE')
+        self.database_url = os.getenv('DATABASE_URL')
+        self.group_chat_id = int(os.getenv('TARGET_CHAT_ID', os.getenv('GROUP_CHAT_ID', '0')))
         
-        # Get the group/channel entity
-        group_id = settings.group_chat_id
+        # Session file
+        self.session_file = 'scripts/whitelist_seeder.session'
+        self.client: Optional[TelegramClient] = None
+        self.db_pool: Optional[asyncpg.Pool] = None
+        
+        # Data tracking
+        self.all_members = []
+        self.existing_whitelist = {}
+        
+    def validate_env(self):
+        """Validate environment variables"""
+        missing = []
+        if not self.api_id:
+            missing.append('TELETHON_API_ID')
+        if not self.api_hash:
+            missing.append('TELETHON_API_HASH')
+        if not self.database_url:
+            missing.append('DATABASE_URL')
+        if not self.group_chat_id:
+            missing.append('TARGET_CHAT_ID or GROUP_CHAT_ID')
+            
+        if missing:
+            print(f"❌ Missing environment variables: {', '.join(missing)}")
+            return False
+        
+        print("✓ Environment variables validated")
+        return True
+    
+    async def connect_telegram(self):
+        """Connect to Telegram as user account"""
+        print(f"Connecting to Telegram (session: {self.session_file})...")
+        self.client = TelegramClient(self.session_file, self.api_id, self.api_hash)
+        await self.client.start(phone=self.phone if self.phone else None)
+        
+        if not await self.client.is_user_authorized():
+            if self.phone:
+                print(f"Sending code to {self.phone[:4]}***{self.phone[-2:]}")
+                await self.client.send_code_request(self.phone)
+                code = input("Enter the code you received: ")
+                try:
+                    await self.client.sign_in(self.phone, code)
+                except SessionPasswordNeededError:
+                    password = input("Two-factor authentication enabled. Enter password: ")
+                    await self.client.sign_in(password=password)
+            else:
+                print("❌ Not authorized and TELETHON_PHONE not set")
+                return False
+        
+        me = await self.client.get_me()
+        print(f"✓ Connected as: {me.first_name} (@{me.username or 'no_username'})")
+        return True
+    
+    async def connect_database(self):
+        """Connect to database"""
+        print("Connecting to database...")
+        self.db_pool = await asyncpg.create_pool(
+            self.database_url,
+            min_size=1,
+            max_size=5
+        )
+        print("✓ Database connected")
+    
+    async def fetch_all_members(self):
+        """Fetch all members from the group"""
+        print(f"\nFetching members from group {self.group_chat_id}...")
+        
+        # Get the group entity
         try:
-            # For supergroups, the ID is negative and starts with -100
-            entity = await client.get_entity(group_id)
-            logger.info(f"Found group: {entity.title}")
+            group = await self.client.get_entity(self.group_chat_id)
+            print(f"✓ Group found: {group.title}")
         except Exception as e:
-            logger.error(f"Failed to get group entity: {e}")
-            logger.error("Make sure you are a member of the group and have the correct group_chat_id")
-            return
+            print(f"❌ Failed to get group: {e}")
+            return False
         
         # Fetch all participants
-        logger.info("Fetching group members...")
-        participants = []
         offset = 0
-        limit = 100
+        limit = 200
         
         while True:
-            result = await client(GetParticipantsRequest(
-                entity,
-                ChannelParticipantsSearch(''),
-                offset,
-                limit,
-                hash=0
-            ))
-            
-            if not result.participants:
-                break
-                
-            participants.extend(result.participants)
-            offset += len(result.participants)
-            
-            logger.info(f"Fetched {len(participants)} members so far...")
-            
-            if len(result.participants) < limit:
-                break
-        
-        logger.info(f"Total members found: {len(participants)}")
-        
-        # Connect to database
-        await db.init()
-        
-        # Add members to whitelist
-        added_count = 0
-        skipped_count = 0
-        
-        for participant in participants:
-            user_id = participant.user_id if hasattr(participant, 'user_id') else participant.id
-            
-            # Skip bots
-            user = await client.get_entity(user_id)
-            if user.bot:
-                logger.debug(f"Skipping bot: {user_id}")
-                continue
-            
-            # Check if already whitelisted
-            existing = await db.fetchrow(
-                "SELECT * FROM whitelist WHERE user_id = $1 AND burned_at IS NULL",
-                user_id
-            )
-            
-            if existing:
-                skipped_count += 1
-                logger.debug(f"User {user_id} already whitelisted")
-                continue
-            
-            # Add to whitelist
             try:
-                await db.execute("""
-                    INSERT INTO whitelist (user_id, reason, created_at)
-                    VALUES ($1, $2, $3)
-                """, user_id, "Existing member - bulk import", datetime.now(timezone.utc))
+                participants = await self.client(GetParticipantsRequest(
+                    channel=group,
+                    filter=ChannelParticipantsSearch(''),
+                    offset=offset,
+                    limit=limit,
+                    hash=0
+                ))
                 
-                added_count += 1
-                logger.info(f"Added user {user_id} ({user.first_name}) to whitelist")
+                if not participants.users:
+                    break
+                
+                for user in participants.users:
+                    if not user.bot and not user.deleted:
+                        member_info = {
+                            'user_id': user.id,
+                            'username': user.username,
+                            'first_name': user.first_name,
+                            'last_name': user.last_name,
+                            'is_premium': getattr(user, 'premium', False),
+                            'is_verified': getattr(user, 'verified', False)
+                        }
+                        self.all_members.append(member_info)
+                
+                print(f"  Fetched {len(self.all_members)} members...")
+                
+                if len(participants.users) < limit:
+                    break
+                    
+                offset += len(participants.users)
+                await asyncio.sleep(0.5)  # Rate limit protection
                 
             except Exception as e:
-                logger.error(f"Failed to add user {user_id}: {e}")
+                print(f"⚠️ Error fetching participants at offset {offset}: {e}")
+                break
         
-        logger.info(f"\n=== Summary ===")
-        logger.info(f"Total members processed: {len(participants)}")
-        logger.info(f"Added to whitelist: {added_count}")
-        logger.info(f"Already whitelisted: {skipped_count}")
-        logger.info(f"Skipped (bots): {len(participants) - added_count - skipped_count}")
-        
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        
-    finally:
-        await client.disconnect()
-        await db.close()
-
-async def seed_whitelist_manual():
-    """Manually add specific users to whitelist"""
-    print("\n=== Manual Whitelist Entry ===")
-    print("Enter user IDs to whitelist (comma-separated):")
-    print("Example: 123456789,987654321")
+        print(f"✓ Total members fetched: {len(self.all_members)}")
+        return True
     
-    user_ids_str = input("> ").strip()
-    
-    if not user_ids_str:
-        print("No user IDs provided")
-        return
-    
-    user_ids = []
-    for uid_str in user_ids_str.split(','):
-        try:
-            user_ids.append(int(uid_str.strip()))
-        except ValueError:
-            print(f"Invalid user ID: {uid_str}")
+    async def check_existing_whitelist(self):
+        """Check which members are already whitelisted"""
+        if not self.all_members:
             return
-    
-    reason = input("Enter reason for whitelisting (optional): ").strip() or "Manual whitelist"
-    
-    # Connect to database
-    await db.init()
-    
-    try:
-        added_count = 0
-        for user_id in user_ids:
-            # Check if already whitelisted
-            existing = await db.fetchrow(
-                "SELECT * FROM whitelist WHERE user_id = $1 AND burned_at IS NULL",
-                user_id
-            )
             
-            if existing:
-                print(f"User {user_id} already whitelisted")
-                continue
-            
-            # Add to whitelist
-            await db.execute("""
-                INSERT INTO whitelist (user_id, reason, created_at)
-                VALUES ($1, $2, $3)
-            """, user_id, reason, datetime.now(timezone.utc))
-            
-            added_count += 1
-            print(f"✓ Added user {user_id} to whitelist")
+        print("\nChecking existing whitelist...")
+        user_ids = [m['user_id'] for m in self.all_members]
         
-        print(f"\nSummary: Added {added_count} users to whitelist")
+        async with self.db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT telegram_id 
+                FROM whitelist 
+                WHERE telegram_id = ANY($1::bigint[]) 
+                AND revoked_at IS NULL
+            """, user_ids)
+            
+            self.existing_whitelist = {row['telegram_id']: True for row in rows}
+            
+        print(f"✓ Found {len(self.existing_whitelist)} already whitelisted")
+    
+    def save_csv_report(self):
+        """Save members to CSV file"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        csv_path = f"seeds/whitelist_seed_{timestamp}.csv"
         
-    except Exception as e:
-        logger.error(f"Error: {e}")
-    finally:
-        await db.close()
-
-async def main():
-    """Main entry point"""
-    print("\n=== Whitelist Seeder ===")
-    print("1. Import all members from Telegram group (requires Telethon)")
-    print("2. Manually add specific user IDs")
-    print("3. Exit")
+        # Create seeds directory
+        Path("seeds").mkdir(exist_ok=True)
+        
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                'user_id', 'username', 'first_name', 'last_name',
+                'is_premium', 'is_verified', 'already_whitelisted', 'action'
+            ])
+            writer.writeheader()
+            
+            for member in self.all_members:
+                row = member.copy()
+                row['already_whitelisted'] = member['user_id'] in self.existing_whitelist
+                row['action'] = 'skip' if row['already_whitelisted'] else 'add'
+                writer.writerow(row)
+        
+        print(f"✓ CSV report saved: {csv_path}")
+        return csv_path
     
-    choice = input("\nSelect option (1-3): ").strip()
+    async def apply_whitelist(self):
+        """Apply whitelist changes to database"""
+        if self.dry_run:
+            print("\n🔍 DRY RUN MODE - No database changes")
+            return
+        
+        print("\n📝 Applying whitelist changes...")
+        added = 0
+        
+        async with self.db_pool.acquire() as conn:
+            for member in self.all_members:
+                if member['user_id'] not in self.existing_whitelist:
+                    try:
+                        # Build note
+                        note_parts = []
+                        if member['username']:
+                            note_parts.append(f"@{member['username']}")
+                        if member['first_name']:
+                            note_parts.append(member['first_name'])
+                        if member['is_premium']:
+                            note_parts.append("Premium")
+                        
+                        note = f"Telethon seed: {' - '.join(note_parts)}" if note_parts else "Telethon seed"
+                        
+                        await conn.execute("""
+                            INSERT INTO whitelist (telegram_id, source, note)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (telegram_id) DO UPDATE
+                            SET revoked_at = NULL,
+                                source = 'telethon_seed',
+                                note = $3
+                        """, member['user_id'], 'telethon_seed', note)
+                        
+                        added += 1
+                        if added % 50 == 0:
+                            print(f"  Progress: {added} added...")
+                            
+                    except Exception as e:
+                        print(f"  ⚠️ Failed to whitelist {member['user_id']}: {e}")
+        
+        print(f"✓ Added {added} members to whitelist")
     
-    if choice == '1':
-        await seed_whitelist_from_group()
-    elif choice == '2':
-        await seed_whitelist_manual()
-    elif choice == '3':
-        print("Exiting...")
-    else:
-        print("Invalid choice")
+    async def print_sample(self):
+        """Print sample of members"""
+        print("\n📊 Sample Members (Top 20):")
+        print("-" * 80)
+        
+        for i, member in enumerate(self.all_members[:20], 1):
+            username = f"@{member['username']}" if member['username'] else "no_username"
+            name = member['first_name'] or "Unknown"
+            whitelisted = "✓ Already" if member['user_id'] in self.existing_whitelist else "➕ To Add"
+            premium = "⭐" if member['is_premium'] else ""
+            
+            print(f"{i:2}. {name:20} {username:20} ID:{member['user_id']:10} {whitelisted} {premium}")
+    
+    async def run(self):
+        """Main execution"""
+        print("="*80)
+        print(f"WHITELIST SEEDING - {'DRY RUN' if self.dry_run else 'LIVE'}")
+        print("="*80)
+        
+        try:
+            # Validate environment
+            if not self.validate_env():
+                return False
+            
+            # Connect to services
+            if not await self.connect_telegram():
+                return False
+            await self.connect_database()
+            
+            # Fetch members
+            if not await self.fetch_all_members():
+                return False
+            
+            # Check existing whitelist
+            await self.check_existing_whitelist()
+            
+            # Calculate stats
+            stats = {
+                'total_participants': len(self.all_members),
+                'already_whitelisted': len(self.existing_whitelist),
+                'to_add': len(self.all_members) - len([m for m in self.all_members if m['user_id'] in self.existing_whitelist])
+            }
+            
+            print("\n📊 STATISTICS:")
+            print(f"  Total participants: {stats['total_participants']}")
+            print(f"  Already whitelisted: {stats['already_whitelisted']}")
+            print(f"  To add: {stats['to_add']}")
+            
+            # Save CSV report
+            csv_path = self.save_csv_report()
+            
+            # Print sample
+            await self.print_sample()
+            
+            # Apply changes if not dry run
+            if not self.dry_run:
+                await self.apply_whitelist()
+                
+                # Log event
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute("""
+                        INSERT INTO funnel_events (user_id, event_type, metadata)
+                        VALUES (NULL, 'whitelist_telethon_seed', $1)
+                    """, json.dumps(stats))
+            
+            print("\n" + "="*80)
+            if self.dry_run:
+                print("✅ DRY RUN COMPLETE - Review the CSV and run with DRY_RUN=false to apply")
+            else:
+                print("✅ WHITELIST SEEDING COMPLETE")
+            print("="*80)
+            
+            return True
+            
+        except Exception as e:
+            print(f"\n❌ ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+        finally:
+            if self.client:
+                await self.client.disconnect()
+            if self.db_pool:
+                await self.db_pool.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    seeder = WhitelistSeeder()
+    asyncio.run(seeder.run())

@@ -24,6 +24,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_payments_star_tx
     ON payments(star_tx_id) WHERE star_tx_id IS NOT NULL;
 
 -- Create performance indexes
+-- Ensure one active/grace subscription per user for ON CONFLICT logic
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_sub_active_grace_per_user
+    ON subscriptions(user_id) WHERE status IN ('active', 'grace');
+
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 CREATE INDEX IF NOT EXISTS idx_users_referrer ON users(referrer_id);
 

@@ -1,0 +1,49 @@
+-- Migration: [Brief description]
+-- Author: [Your name]
+-- Date: [YYYY-MM-DD]
+-- Description: [Detailed description of what this migration does and why]
+
+-- UP
+
+BEGIN;
+
+-- Your forward migration SQL here
+-- Use IF NOT EXISTS/IF EXISTS to make it idempotent
+-- Example:
+-- CREATE TABLE IF NOT EXISTS example_table (
+--     id SERIAL PRIMARY KEY,
+--     created_at TIMESTAMPTZ DEFAULT NOW()
+-- );
+--
+-- CREATE INDEX IF NOT EXISTS idx_example ON example_table(created_at);
+--
+-- ALTER TABLE existing_table 
+--     ADD COLUMN IF NOT EXISTS new_column TEXT;
+
+COMMIT;
+
+-- Optional: Log success
+DO $$ 
+BEGIN
+    RAISE NOTICE 'Successfully applied migration [number]';
+END $$;
+
+-- DOWN
+
+BEGIN;
+
+-- Your rollback SQL here (optional but recommended)
+-- Should reverse the changes made in UP section
+-- Example:
+-- DROP INDEX IF EXISTS idx_example;
+-- DROP TABLE IF EXISTS example_table;
+-- ALTER TABLE existing_table 
+--     DROP COLUMN IF EXISTS new_column;
+
+COMMIT;
+
+-- Optional: Log rollback
+DO $$ 
+BEGIN
+    RAISE NOTICE 'Successfully rolled back migration [number]';
+END $$;

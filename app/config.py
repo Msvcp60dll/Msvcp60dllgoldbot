@@ -13,11 +13,16 @@ class Settings(BaseSettings):
     supabase_service_key: str = Field(..., description="Supabase service role key")
     supabase_db_password: Optional[str] = Field(default=None, description="Supabase database password")
     
-    webhook_secret: str = Field(..., description="Secret path for webhook URL")
-    webhook_host: str = Field(default="", description="Public webhook host (e.g., https://bot.railway.app)")
+    # Optional direct database URL override (Session Pooler). Must use sslmode=require
+    database_url_env: Optional[str] = Field(default=None, alias="DATABASE_URL")
     
-    plan_stars: int = Field(default=499, description="One-time payment price in Stars")
-    sub_stars: int = Field(default=449, description="Monthly subscription price in Stars")
+    webhook_secret: str = Field(..., description="Secret path for webhook URL")
+    telegram_secret_token: Optional[str] = Field(default=None, description="Expected X-Telegram-Bot-Api-Secret-Token header value")
+    webhook_host: str = Field(default="", description="Public webhook host (e.g., https://bot.railway.app)")
+    public_base_url_env: Optional[str] = Field(default=None, alias="PUBLIC_BASE_URL")
+    
+    plan_stars: int = Field(default=30, description="One-time payment price in Stars")
+    sub_stars: int = Field(default=30, description="Monthly subscription price in Stars")
     plan_days: int = Field(default=30, description="One-time access duration in days")
     
     grace_hours: int = Field(default=48, description="Grace period after expiry in hours")
@@ -30,13 +35,17 @@ class Settings(BaseSettings):
     dashboard_user: Optional[str] = Field(default=None, description="Optional basic auth username")
     dashboard_pass: Optional[str] = Field(default=None, description="Optional basic auth password")
     
-    log_level: str = Field(default="INFO", description="Logging level")
+    log_level: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    log_format: str = Field(default="console", description="Log format (console or json)")
+    log_file: Optional[str] = Field(default=None, description="Optional log file path")
+    environment: str = Field(default="development", description="Environment (development, staging, production)")
     timezone: str = Field(default="UTC", description="Timezone for scheduling")
     
     class Config:
         env_file = ".env"
         case_sensitive = False
         env_file_encoding = 'utf-8'
+        extra = 'ignore'  # Ignore extra environment variables
         
     @validator("owner_ids", always=True)
     def parse_owner_ids(cls, v):
@@ -72,22 +81,40 @@ class Settings(BaseSettings):
     
     @property
     def webhook_url(self) -> str:
-        if not self.webhook_host:
+        base = (self.webhook_host or self.public_base_url_env or "").rstrip('/')
+        if not base:
             return ""
-        return f"{self.webhook_host.rstrip('/')}{self.webhook_path}"
+        return f"{base}{self.webhook_path}"
+
+    @property
+    def public_base_url(self) -> str:
+        return (self.webhook_host or self.public_base_url_env or "").rstrip('/')
+
+    @property
+    def effective_telegram_secret(self) -> str:
+        return self.telegram_secret_token or self.webhook_secret
     
     @property
     def database_url(self) -> str:
-        # Extract project ID from Supabase URL
-        import re
-        match = re.match(r'https://([^.]+)\.supabase\.co', self.supabase_url)
-        if match:
+        # Prefer explicit env DATABASE_URL when provided
+        url = self.database_url_env
+        if not url:
+            # Construct Session Pooler URL from Supabase project id
+            import re
+            match = re.match(r'https://([^.]+)\.supabase\.co', self.supabase_url)
+            if not match:
+                raise ValueError("Invalid Supabase URL format")
             project_id = match.group(1)
-            # Use database password if provided, otherwise fall back to service key
             password = self.supabase_db_password or self.supabase_service_key
-            # Using Session Pooler connection (aws-1-eu-west-2)
-            return f"postgresql://postgres.{project_id}:{password}@aws-1-eu-west-2.pooler.supabase.com:5432/postgres"
-        raise ValueError("Invalid Supabase URL format")
+            url = (
+                f"postgresql://postgres.{project_id}:{password}"
+                f"@aws-1-eu-west-2.pooler.supabase.com:5432/postgres"
+            )
+        # Ensure sslmode=require
+        if "sslmode=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}sslmode=require"
+        return url
     
     def is_owner(self, user_id: int) -> bool:
         return user_id in self.owner_ids

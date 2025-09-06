@@ -2,6 +2,13 @@
 
 Production-ready Telegram bot for selling group access via Telegram Stars payments (one-time and recurring subscriptions).
 
+## 🚨 Deployment Status
+
+✅ **READY FOR DEPLOYMENT** - All 1,198 existing members have been whitelisted!
+- Existing members: Free access forever (whitelisted)  
+- New members: Must pay 3,800 Stars (one-time) or 2,500 Stars/month (subscription)
+- Deploy now: `railway up`
+
 ## Features
 
 - 💎 **Telegram Stars Payments**: One-time passes and monthly subscriptions
@@ -67,11 +74,73 @@ python main.py
 
 ## Deployment to Railway
 
+### Pre-Deployment Checklist ✅
+
+1. **Whitelist Import** (COMPLETED ✅)
+   - 1,198 existing members imported to whitelist table
+   - Source: `initial_import` 
+   - These members have permanent free access
+   
+2. **Environment Variables** (Set in Railway dashboard)
+   - All variables from `.env` file are configured
+   - Prices set to production values (3800/2500 Stars)
+
+3. **Deploy Command**
+   ```bash
+   railway up
+   ```
+
+### Deployment Steps
+
 1. Connect your GitHub repository to Railway
 2. Set all environment variables in Railway dashboard
 3. Deploy using the provided `railway.toml` configuration
 4. Set webhook URL in your bot:
    - URL format: `https://your-app.railway.app/webhook/{WEBHOOK_SECRET}`
+
+### Production switch & webhook
+
+If a domain already exists (e.g., https://msvcp60dllgoldbot-production.up.railway.app):
+- Set `WEBHOOK_HOST=https://<domain>` and (for compatibility) `PUBLIC_BASE_URL=https://<domain>` in Railway Variables.
+- Verify required envs: `BOT_TOKEN`, `GROUP_CHAT_ID`, `OWNER_IDS`, `DATABASE_URL` (must include `sslmode=require`), `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `WEBHOOK_SECRET`.
+- Deploy with full start (`start_wrapper.py`) — health remains at `/health` and `/healthz`.
+- Webhook is auto-installed on startup when public URL and secret exist. Fallback:
+  ```bash
+  bash scripts/set_webhook.sh
+  ```
+
+Migrations:
+```bash
+bash scripts/apply_schema.sh
+```
+
+Checks:
+```bash
+curl -sS $PUBLIC_BASE_URL/health | jq .
+curl -sS $PUBLIC_BASE_URL/healthz | jq .
+```
+
+### First Deploy → Domain → Switch back (Railway)
+
+1) First deploy to get a domain
+- `railway.toml` currently uses `startCommand = "python start_wrapper_min.py"`.
+- Deploy on Railway. The minimal health server will pass `/health` without any secrets set.
+
+2) Set domain as public base URL
+- In Railway Variables add `WEBHOOK_HOST=https://<your-domain>`.
+- For compatibility, you may also set `PUBLIC_BASE_URL` to the same value.
+
+3) Switch to full wrapper and redeploy
+- Change `startCommand` to `python start_wrapper.py` and redeploy.
+- Ensure `BOT_TOKEN`, `DATABASE_URL`, and `WEBHOOK_SECRET` are set. The app auto-sets the webhook when `WEBHOOK_HOST`/`PUBLIC_BASE_URL` exists.
+
+4) If webhook isn’t set automatically
+- The code sets it with a secret token; if needed, set manually:
+  ```bash
+  curl -X POST "https://api.telegram.org/bot<token>/setWebhook" \
+    -H 'Content-Type: application/json' \
+    -d '{"url":"https://<your-domain>/webhook/<WEBHOOK_SECRET>","secret_token":"<WEBHOOK_SECRET>"}'
+  ```
 
 ## Bot Commands
 
@@ -104,6 +173,34 @@ https://your-bot.railway.app/admin/dashboard
 Authentication via Bearer token:
 ```
 Authorization: Bearer your_dashboard_token
+```
+
+## Whitelist Management
+
+### Initial Import (COMPLETED)
+- **1,198 members** imported from Msvcp60dll group
+- All have permanent free access (won't be kicked)
+- Import timestamp: 2025-09-06 03:18:46 UTC
+
+### Whitelist Table Structure
+```sql
+telegram_id  BIGINT       -- User's Telegram ID
+granted_at   TIMESTAMP    -- When access was granted
+revoked_at   TIMESTAMP    -- If/when access was revoked
+source       TEXT         -- 'initial_import', 'owner', 'manual', etc.
+note         TEXT         -- Additional notes
+```
+
+### Managing Whitelist
+```python
+# Check import status
+python verify_import.py
+
+# Import additional members from CSV
+python import_whitelist.py
+
+# View in Supabase dashboard
+SELECT * FROM whitelist WHERE source = 'initial_import';
 ```
 
 ## Key Features

@@ -13,8 +13,25 @@ class Database:
     def __init__(self):
         self.pool: Optional[Pool] = None
     
+    async def _init_connection(self, connection):
+        """Initialize connection with JSON codec"""
+        import json
+        await connection.set_type_codec(
+            'json',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog'
+        )
+        await connection.set_type_codec(
+            'jsonb',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog'
+        )
+    
     async def connect(self):
         """Create connection pool with retry logic"""
+        import json
         max_retries = 5
         retry_delay = 1
         
@@ -26,7 +43,8 @@ class Database:
                     max_size=10,
                     max_queries=50000,
                     max_inactive_connection_lifetime=300,
-                    command_timeout=60
+                    command_timeout=60,
+                    init=self._init_connection
                 )
                 logger.info("Database connection pool created")
                 return
@@ -135,23 +153,38 @@ class Database:
         """Process subscription payment and extend access"""
         async with self.acquire() as conn:
             async with conn.transaction(isolation='repeatable_read'):
-                # Get or create subscription
-                sub = await conn.fetchrow("""
-                    INSERT INTO subscriptions (user_id, status, is_recurring, expires_at)
-                    VALUES ($1, 'active', $2, $3)
-                    ON CONFLICT (user_id) WHERE status IN ('active', 'grace') DO UPDATE SET
-                        status = 'active',
-                        is_recurring = EXCLUDED.is_recurring,
-                        expires_at = GREATEST(
-                            COALESCE(subscriptions.expires_at, NOW()),
-                            EXCLUDED.expires_at
-                        ),
-                        grace_until = NULL,
-                        grace_started_at = NULL,
-                        updated_at = NOW()
-                    RETURNING *
-                """, user_id, is_recurring, 
-                    subscription_expiration or datetime.now(timezone.utc) + timedelta(days=settings.plan_days))
+                # Get or create subscription - First, check for existing active/grace subscription
+                existing_sub = await conn.fetchrow("""
+                    SELECT * FROM subscriptions 
+                    WHERE user_id = $1 AND status IN ('active', 'grace')
+                    ORDER BY expires_at DESC LIMIT 1
+                """, user_id)
+                
+                if existing_sub:
+                    # Update existing subscription
+                    sub = await conn.fetchrow("""
+                        UPDATE subscriptions 
+                        SET status = 'active',
+                            is_recurring = $2,
+                            expires_at = GREATEST(
+                                COALESCE(expires_at, NOW()),
+                                $3
+                            ),
+                            grace_until = NULL,
+                            grace_started_at = NULL,
+                            updated_at = NOW()
+                        WHERE subscription_id = $1
+                        RETURNING *
+                    """, existing_sub['subscription_id'], is_recurring,
+                        subscription_expiration or datetime.now(timezone.utc) + timedelta(days=settings.plan_days))
+                else:
+                    # Create new subscription
+                    sub = await conn.fetchrow("""
+                        INSERT INTO subscriptions (user_id, status, is_recurring, expires_at)
+                        VALUES ($1, 'active', $2, $3)
+                        RETURNING *
+                    """, user_id, is_recurring,
+                        subscription_expiration or datetime.now(timezone.utc) + timedelta(days=settings.plan_days))
                 
                 # Update payment with subscription_id
                 await conn.execute("""
@@ -176,36 +209,38 @@ class Database:
         return await self.fetchval("""
             SELECT EXISTS(
                 SELECT 1 FROM whitelist
-                WHERE user_id = $1 
-                    AND burned_at IS NULL
-                    AND (expires_at IS NULL OR expires_at > NOW())
+                WHERE telegram_id = $1 
+                    AND revoked_at IS NULL
             )
         """, user_id)
     
     async def burn_whitelist(self, user_id: int) -> bool:
-        """Burn whitelist entry on join request"""
+        """Burn whitelist entry on join request (mark as used)"""
         result = await self.execute("""
             UPDATE whitelist 
-            SET burned_at = NOW()
-            WHERE user_id = $1 AND burned_at IS NULL
+            SET revoked_at = NOW(), note = COALESCE(note, '') || ' - Used for join'
+            WHERE telegram_id = $1 AND revoked_at IS NULL
         """, user_id)
         return result != "UPDATE 0"
     
     async def revoke_whitelist(self, user_id: int):
         """Revoke whitelist on user leaving"""
         await self.execute("""
-            DELETE FROM whitelist 
-            WHERE user_id = $1 AND burned_at IS NULL
+            UPDATE whitelist
+            SET revoked_at = NOW(), note = COALESCE(note, '') || ' - User left group'
+            WHERE telegram_id = $1 AND revoked_at IS NULL
         """, user_id)
     
     # Funnel events
     async def log_event(self, user_id: Optional[int], event_type: str, 
                        metadata: Dict[str, Any] = None):
         """Log funnel event"""
+        import json
+        metadata_json = json.dumps(metadata or {})
         await self.execute("""
             INSERT INTO funnel_events (user_id, event_type, metadata)
-            VALUES ($1, $2, $3)
-        """, user_id, event_type, metadata or {})
+            VALUES ($1, $2, $3::jsonb)
+        """, user_id, event_type, metadata_json)
     
     # Grace period transitions
     async def find_to_grace(self, now: datetime) -> List[dict]:
@@ -245,17 +280,37 @@ class Database:
     
     # Reconciliation
     async def get_reconcile_cursor(self) -> Optional[datetime]:
-        """Get last reconciliation timestamp"""
-        return await self.fetchval("""
+        """Get last reconciliation timestamp, initialize if missing"""
+        cursor_time = await self.fetchval("""
             SELECT last_tx_at FROM star_tx_cursor WHERE id = 1
         """)
+        
+        if cursor_time is None:
+            # Initialize cursor if missing
+            from datetime import timedelta
+            initial_time = datetime.now(timezone.utc) - timedelta(days=7)
+            await self.execute("""
+                INSERT INTO star_tx_cursor (id, last_tx_at, updated_at)
+                VALUES (1, $1, NOW())
+                ON CONFLICT (id) DO NOTHING
+            """, initial_time)
+            
+            # Return the initialized value
+            cursor_time = await self.fetchval("""
+                SELECT last_tx_at FROM star_tx_cursor WHERE id = 1
+            """)
+        
+        return cursor_time
     
     async def update_reconcile_cursor(self, last_tx_at: datetime, last_tx_id: str = None):
-        """Update reconciliation cursor"""
+        """Update reconciliation cursor, create if missing"""
         await self.execute("""
-            UPDATE star_tx_cursor 
-            SET last_tx_at = $1, last_tx_id = $2, updated_at = NOW()
-            WHERE id = 1
+            INSERT INTO star_tx_cursor (id, last_tx_at, last_tx_id, updated_at)
+            VALUES (1, $1, $2, NOW())
+            ON CONFLICT (id) DO UPDATE
+            SET last_tx_at = EXCLUDED.last_tx_at,
+                last_tx_id = EXCLUDED.last_tx_id,
+                updated_at = NOW()
         """, last_tx_at, last_tx_id)
     
     # Stats for dashboard
@@ -298,6 +353,140 @@ class Database:
             SET sent = true, sent_at = NOW()
             WHERE notification_id = $1
         """, notification_id)
+
+    
+    # ============= Feature Flags =============
+    async def get_feature_flag(self, key: str) -> Optional[bool]:
+        """Get feature flag value"""
+        result = await self.fetchrow("""
+            SELECT bool_value FROM feature_flags WHERE key = $1
+        """, key)
+        return result['bool_value'] if result else None
+    
+    async def set_feature_flag(self, key: str, value: bool) -> bool:
+        """Set feature flag value"""
+        await self.execute("""
+            INSERT INTO feature_flags (key, bool_value)
+            VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE 
+            SET bool_value = $2, updated_at = NOW()
+        """, key, value)
+        return True
+    
+    async def is_kicks_enabled(self) -> bool:
+        """Check if kicks are enabled"""
+        result = await self.get_feature_flag('kick_enabled')
+        if result is not None:
+            return result
+        # Fallback to environment variable
+        import os
+        return os.getenv('KICK_ENABLED', 'false').lower() == 'true'
+    
+    # ============= Whitelist Functions =============
+    async def grant_whitelist(self, user_id: int, source: str = 'manual', note: str = None) -> bool:
+        """Grant whitelist to user (idempotent)"""
+        try:
+            await self.execute("""
+                INSERT INTO whitelist (telegram_id, source, note, revoked_at)
+                VALUES ($1, $2, $3, NULL)
+                ON CONFLICT (telegram_id) DO UPDATE
+                SET revoked_at = NULL,
+                    source = COALESCE(whitelist.source, $2),
+                    note = COALESCE($3, whitelist.note)
+            """, user_id, source, note)
+            logger.info(f"Granted whitelist to user {user_id} (source: {source})")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to grant whitelist to {user_id}: {e}")
+            return False
+    
+    async def revoke_whitelist(self, user_id: int, reason: str = 'manual') -> bool:
+        """Revoke whitelist from user"""
+        try:
+            result = await self.execute("""
+                UPDATE whitelist 
+                SET revoked_at = NOW(), note = COALESCE(note, '') || ' [Revoked: ' || $2 || ']'
+                WHERE telegram_id = $1 AND revoked_at IS NULL
+            """, user_id, reason)
+            
+            if result and 'UPDATE' in result:
+                logger.info(f"Revoked whitelist from user {user_id} (reason: {reason})")
+                # Track event
+                await self.track_event('whitelist_burned', user_id, {'reason': reason})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to revoke whitelist from {user_id}: {e}")
+            return False
+    
+    async def is_whitelisted(self, user_id: int) -> bool:
+        """Check if user is whitelisted (active, not revoked)"""
+        result = await self.fetchrow("""
+            SELECT 1 FROM whitelist 
+            WHERE telegram_id = $1 AND revoked_at IS NULL
+        """, user_id)
+        return result is not None
+    
+    async def get_whitelist_status(self, user_id: int) -> Optional[dict]:
+        """Get detailed whitelist status for user"""
+        return await self.fetchrow("""
+            SELECT 
+                telegram_id,
+                granted_at,
+                revoked_at,
+                source,
+                note,
+                CASE WHEN revoked_at IS NULL THEN true ELSE false END as is_active
+            FROM whitelist
+            WHERE telegram_id = $1
+        """, user_id)
+    
+    async def get_whitelist_stats(self) -> dict:
+        """Get whitelist statistics"""
+        result = await self.fetchrow("""
+            SELECT * FROM v_whitelist_summary
+        """)
+        return dict(result) if result else {
+            'total_whitelisted': 0,
+            'revoked_count': 0,
+            'subs_active_whitelisted': 0,
+            'subs_expired_whitelisted': 0
+        }
+    
+    async def bulk_grant_whitelist(self, user_ids: List[int], source: str = 'seed', note: str = None) -> int:
+        """Bulk grant whitelist to multiple users"""
+        count = 0
+        for user_id in user_ids:
+            if await self.grant_whitelist(user_id, source, note):
+                count += 1
+        return count
+    
+    async def get_expired_non_whitelisted(self, limit: int = 100) -> List[dict]:
+        """Get expired users who are NOT whitelisted (for dry-run)"""
+        return await self.fetch("""
+            SELECT 
+                s.user_id,
+                u.username,
+                u.first_name,
+                u.last_name,
+                s.expires_at,
+                s.status,
+                CASE 
+                    WHEN s.status = 'expired' THEN 'subscription_expired'
+                    WHEN s.status = 'grace' AND s.grace_ends_at < NOW() THEN 'grace_period_ended'
+                    ELSE 'other'
+                END as kick_reason
+            FROM subscriptions s
+            JOIN users u ON s.user_id = u.user_id
+            WHERE s.status IN ('expired', 'grace')
+            AND (s.status = 'expired' OR s.grace_ends_at < NOW())
+            AND NOT EXISTS (
+                SELECT 1 FROM whitelist w 
+                WHERE w.telegram_id = s.user_id 
+                AND w.revoked_at IS NULL
+            )
+            ORDER BY s.expires_at
+            LIMIT $1
+        """, limit)
 
 
 # Global database instance
